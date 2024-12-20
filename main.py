@@ -1,9 +1,14 @@
 import io
 import os
+from typing import Dict
+from fastapi.responses import StreamingResponse
 import modal
 import modal.gpu
 import logging
 from starlette.responses import Response
+import threading
+import queue
+
 ONE_MINUTE = 60
 
 # Initialize the modal app
@@ -31,54 +36,90 @@ image = modal.Image.debian_slim(python_version="3.12").pip_install(
 
 with image.imports():
     import torch
-    from diffusers import StableDiffusionPipeline, BitsAndBytesConfig, SD3Transformer2DModel, StableDiffusion3Pipeline
+    from diffusers import StableDiffusion3Pipeline
 
-MODEL_DIR = "/model"  # Path inside the volume
+MODEL_DIR = "/model"
 volume = modal.Volume.from_name("sd3-medium", create_if_missing=True)
-
 model_id = "stabilityai/stable-diffusion-3-medium-diffusers"
 
-@app.cls(image=image, gpu="A10G", timeout=8 * ONE_MINUTE, secrets=[modal.Secret.from_name("huggingface-secret")],volumes={MODEL_DIR: volume})
+@app.cls(image=image, gpu="A10G", timeout=8 * ONE_MINUTE, secrets=[modal.Secret.from_name("huggingface-secret")], volumes={MODEL_DIR: volume})
 class Inference:
 
     @modal.build()
     def download_model(self):
         """Downloads the model and saves it to the Modal Volume during build."""
-        logging.info(" Downloading the Stable Diffusion model 🚶‍♂️...")
+        logging.info("Downloading the Stable Diffusion model 🚶‍♂️...")
         model_path = os.path.join(MODEL_DIR, "model_index.json")
         if os.path.exists(model_path):
-            logging.info(" Skip download --> Model is already present on volume 👍")
+            logging.info("Model is already present on volume 👍")
         else:
             pipeline = StableDiffusion3Pipeline.from_pretrained(model_id, torch_dtype=torch.float16)
             pipeline.save_pretrained(MODEL_DIR)
-            logging.info(" Model downloaded and saved to the volume. 🥳")
-    
+            logging.info("Model downloaded and saved to the volume. 🥳")
+
     @modal.enter()
     def initialize(self):
         """Loads the model from the volume into GPU memory at runtime."""
         logging.info("Initializing DiffusionPipeline and loading model to GPU 🚀...")
-        # Mount the volume and load model
         self.pipe = StableDiffusion3Pipeline.from_pretrained(MODEL_DIR, torch_dtype=torch.float16)
         self.pipe.enable_model_cpu_offload()
         self.pipe.enable_attention_slicing()
-
-        logging.info(" Model successfully loaded into GPU memory. 👍")
+        logging.info("Model successfully loaded into GPU memory. 👍")
 
     @modal.method()
-    def run(self, prompt: str) -> list[bytes]:
-        """Generates an image based on the given prompt."""
-        logging.info(f"Generating image with prompt: {prompt}")
-        image = self.pipe(prompt).images[0]
-        buffer = io.BytesIO()
-        image.save(buffer, format="PNG", quality=95)
-        return buffer.getvalue()
+    def run_with_progress(self, prompt: str):
+        """Streams intermediate images during generation."""
+        images_queue = queue.Queue()
+
+        def callback_on_step_end(pipeline, step: int, timestep: int, callback_kwargs: Dict):
+            latents = callback_kwargs.get("latents")
+            if latents is not None:
+                with torch.no_grad():
+                    # Decode latents to image
+                    decoded = pipeline.vae.decode(latents.to(pipeline.vae.dtype))
+                    image_tensor = decoded.sample  # This is a tensor
+
+                    # Convert to CPU numpy array for `numpy_to_pil`
+                    image_tensor = image_tensor.cpu().permute(0, 2, 3, 1).float().numpy()
+                
+                pil_image = pipeline.numpy_to_pil(image_tensor)[0]
+
+                # Convert PIL image to PNG bytes
+                buffer = io.BytesIO()
+                pil_image.save(buffer, format="PNG", quality=95)
+                images_queue.put(buffer.getvalue())
+            
+            # Always return a dict containing the latents so the pipeline won't fail
+            return {"latents": latents}
+
+
+        def run_pipeline():
+            self.pipe(
+                prompt=prompt,
+                num_inference_steps=28,
+                callback_on_step_end=callback_on_step_end,
+                callback_on_step_end_tensor_inputs=["latents"],
+            )
+
+        # Run the pipeline in a separate thread so we can yield images in real-time
+        pipeline_thread = threading.Thread(target=run_pipeline)
+        pipeline_thread.start()
+
+        # Stream images
+        boundary = b"--frame"
+        while pipeline_thread.is_alive() or not images_queue.empty():
+            try:
+                image_data = images_queue.get(timeout=1)
+                # Yield bytes directly
+                yield boundary + b"\r\n" \
+                      b"Content-Type: image/png\r\n\r\n" + image_data + b"\r\n"
+            except queue.Empty:
+                pass
 
     @modal.web_endpoint(docs=True)
     def web(self, prompt: str):
-        """Exposes a web endpoint for generating images."""
-        image_bytes = self.run.local(prompt)
-        return Response(
-            content=image_bytes,
-            status_code=200,
-            media_type="image/png"
+        """Streams image generation progress to the web."""
+        return StreamingResponse(
+            self.run_with_progress.local(prompt),
+            media_type="multipart/x-mixed-replace;boundary=frame"
         )
