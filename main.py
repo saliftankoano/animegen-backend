@@ -1,5 +1,6 @@
 import io
 import os
+import time
 from typing import Dict
 from fastapi.responses import StreamingResponse
 import modal
@@ -66,60 +67,57 @@ class Inference:
         self.pipe.enable_attention_slicing()
         logging.info("Model successfully loaded into GPU memory. 👍")
 
+    def generate_image(self, prompt: str, steps: int, seed: int = 42) -> bytes:
+        # Create a torch.Generator and set a manual seed
+        generator = torch.Generator(device=self.pipe.device)
+        generator.manual_seed(seed)
+
+        # Run the pipeline with a fixed seed
+        image = self.pipe(
+            prompt=prompt,
+            num_inference_steps=steps,
+            guidance_scale=7.0,
+            generator=generator
+        ).images[0]
+
+        # Convert PIL to bytes
+        buffer = io.BytesIO()
+        image.save(buffer, format="PNG", quality=95)
+        return buffer.getvalue()
+    
     @modal.method()
-    def run_with_progress(self, prompt: str):
-        """Streams intermediate images during generation."""
-        images_queue = queue.Queue()
-
-        def callback_on_step_end(pipeline, step: int, timestep: int, callback_kwargs: Dict):
-            latents = callback_kwargs.get("latents")
-            if latents is not None:
-                with torch.no_grad():
-                    # Decode latents to image
-                    decoded = pipeline.vae.decode(latents.to(pipeline.vae.dtype))
-                    image_tensor = decoded.sample  # This is a tensor
-
-                    # Convert to CPU numpy array for `numpy_to_pil`
-                    image_tensor = image_tensor.cpu().permute(0, 2, 3, 1).float().numpy()
-                
-                pil_image = pipeline.numpy_to_pil(image_tensor)[0]
-
-                # Convert PIL image to PNG bytes
-                buffer = io.BytesIO()
-                pil_image.save(buffer, format="PNG", quality=95)
-                images_queue.put(buffer.getvalue())
-            
-            # Always return a dict containing the latents so the pipeline won't fail
-            return {"latents": latents}
-
-
-        def run_pipeline():
-            self.pipe(
-                prompt=prompt,
-                num_inference_steps=28,
-                callback_on_step_end=callback_on_step_end,
-                callback_on_step_end_tensor_inputs=["latents"],
-            )
-
-        # Run the pipeline in a separate thread so we can yield images in real-time
-        pipeline_thread = threading.Thread(target=run_pipeline)
-        pipeline_thread.start()
-
-        # Stream images
-        boundary = b"--frame"
-        while pipeline_thread.is_alive() or not images_queue.empty():
-            try:
-                image_data = images_queue.get(timeout=1)
-                # Yield bytes directly
-                yield boundary + b"\r\n" \
-                      b"Content-Type: image/png\r\n\r\n" + image_data + b"\r\n"
-            except queue.Empty:
-                pass
+    def generate_staged_images(self, prompt: str):
+        """
+        Pre-generate images at multiple steps to simulate progressive refinement.
+        For example:
+          - First run at 10 steps (rough draft)
+          - Second run at 20 steps (more refined)
+          - Final run at 28 steps (final image)
+        """
+        steps = [10, 20, 28]
+        images = []
+        for step in steps:
+            logging.info(f"Generating image at {steps} steps...")
+            image_bytes = self.generate_image(prompt=prompt, steps=step)
+            images.append(image_bytes)
+        return images
 
     @modal.web_endpoint(docs=True)
     def web(self, prompt: str):
-        """Streams image generation progress to the web."""
+        """Pretend to stream by sending pre-generated images one after another with a delay."""
+        images = self.generate_staged_images.local(prompt)
+        boundary = b"frame"
+
+        def image_stream():
+            for img in images:
+                yield b"--" + boundary + b"\r\n"
+                yield b"Content-Type: image/png\r\n\r\n" + img + b"\r\n"
+                # Wait a bit before sending the next image
+                time.sleep(1)
+            # Optionally, close the multipart
+            yield b"--" + boundary + b"--\r\n"
+
         return StreamingResponse(
-            self.run_with_progress.local(prompt),
+            image_stream(),
             media_type="multipart/x-mixed-replace;boundary=frame"
         )
