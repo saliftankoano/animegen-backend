@@ -32,7 +32,7 @@ image = modal.Image.debian_slim(python_version="3.12").pip_install(
 
 with image.imports():
     import torch
-    from diffusers import StableDiffusionPipeline, BitsAndBytesConfig, SD3Transformer2DModel, StableDiffusion3Pipeline
+    from diffusers import StableDiffusion3Pipeline
 
 MODEL_DIR = "/model"  # Path inside the volume
 volume = modal.Volume.from_name("sd3-medium", create_if_missing=True)
@@ -93,7 +93,7 @@ class Inference:
                 status_code=401,
                 detail="Unauthorized attempt to access the endpoint"
             )
-            
+
         image_bytes = self.run.local(prompt)
         return Response(
             content=image_bytes,
