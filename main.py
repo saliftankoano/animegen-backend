@@ -1,15 +1,9 @@
 import io
 import os
-import time
-from typing import Dict
-from fastapi.responses import StreamingResponse
 import modal
 import modal.gpu
 import logging
 from starlette.responses import Response
-import threading
-import queue
-
 ONE_MINUTE = 60
 
 # Initialize the modal app
@@ -37,87 +31,59 @@ image = modal.Image.debian_slim(python_version="3.12").pip_install(
 
 with image.imports():
     import torch
-    from diffusers import StableDiffusion3Pipeline
+    from diffusers import StableDiffusionPipeline, BitsAndBytesConfig, SD3Transformer2DModel, StableDiffusion3Pipeline
 
-MODEL_DIR = "/model"
+MODEL_DIR = "/model"  # Path inside the volume
 volume = modal.Volume.from_name("sd3-medium", create_if_missing=True)
+
 model_id = "stabilityai/stable-diffusion-3-medium-diffusers"
 
-@app.cls(image=image, gpu="A10G", timeout=8 * ONE_MINUTE, secrets=[modal.Secret.from_name("huggingface-secret")], volumes={MODEL_DIR: volume})
+@app.cls(image=image, gpu="A10G", timeout=8 * ONE_MINUTE, secrets=[modal.Secret.from_name("huggingface-secret")],volumes={MODEL_DIR: volume})
 class Inference:
 
     @modal.build()
     def download_model(self):
         """Downloads the model and saves it to the Modal Volume during build."""
-        logging.info("Downloading the Stable Diffusion model 🚶‍♂️...")
+        logging.info(" Downloading the Stable Diffusion model 🚶‍♂️...")
         model_path = os.path.join(MODEL_DIR, "model_index.json")
         if os.path.exists(model_path):
-            logging.info("Model is already present on volume 👍")
+            logging.info(" Skip download --> Model is already present on volume 👍")
         else:
             pipeline = StableDiffusion3Pipeline.from_pretrained(model_id, torch_dtype=torch.float16)
             pipeline.save_pretrained(MODEL_DIR)
-            logging.info("Model downloaded and saved to the volume. 🥳")
-
+            logging.info(" Model downloaded and saved to the volume. 🥳")
+    
     @modal.enter()
     def initialize(self):
         """Loads the model from the volume into GPU memory at runtime."""
         logging.info("Initializing DiffusionPipeline and loading model to GPU 🚀...")
+        # Mount the volume and load model
         self.pipe = StableDiffusion3Pipeline.from_pretrained(MODEL_DIR, torch_dtype=torch.float16)
         self.pipe.enable_model_cpu_offload()
         self.pipe.enable_attention_slicing()
-        logging.info("Model successfully loaded into GPU memory. 👍")
 
-    def generate_image(self, prompt: str, steps: int, seed: int = 42) -> bytes:
-        # Create a torch.Generator and set a manual seed
-        generator = torch.Generator(device=self.pipe.device)
-        generator.manual_seed(seed)
+        logging.info(" Model successfully loaded into GPU memory. 👍")
 
-        # Run the pipeline with a fixed seed
+    @modal.method()
+    def run(self, prompt: str) -> list[bytes]:
+        """Generates an image based on the given prompt."""
+        logging.info(f"Generating image with prompt: {prompt}")
         image = self.pipe(
-            prompt=prompt,
-            num_inference_steps=steps,
+            prompt,
+            negative_prompt="bad hands, bad feet bad face, foggy, unclear, noisy",
+            num_inference_steps=15,
             guidance_scale=7.0,
-            generator=generator
         ).images[0]
-
-        # Convert PIL to bytes
         buffer = io.BytesIO()
         image.save(buffer, format="PNG", quality=95)
         return buffer.getvalue()
-    
-    @modal.method()
-    def generate_staged_images(self, prompt: str):
-        """
-        Pre-generate images at multiple steps to simulate progressive refinement.
-        For example:
-          - First run at 10 steps (rough draft)
-          - Second run at 20 steps (more refined)
-          - Final run at 28 steps (final image)
-        """
-        steps = [10, 20, 28]
-        images = []
-        for step in steps:
-            logging.info(f"Generating image at {steps} steps...")
-            image_bytes = self.generate_image(prompt=prompt, steps=step)
-            images.append(image_bytes)
-        return images
 
     @modal.web_endpoint(docs=True)
     def web(self, prompt: str):
-        """Pretend to stream by sending pre-generated images one after another with a delay."""
-        images = self.generate_staged_images.local(prompt)
-        boundary = b"frame"
-
-        def image_stream():
-            for img in images:
-                yield b"--" + boundary + b"\r\n"
-                yield b"Content-Type: image/png\r\n\r\n" + img + b"\r\n"
-                # Wait a bit before sending the next image
-                time.sleep(1)
-            # Optionally, close the multipart
-            yield b"--" + boundary + b"--\r\n"
-
-        return StreamingResponse(
-            image_stream(),
-            media_type="multipart/x-mixed-replace;boundary=frame"
+        """Exposes a web endpoint for generating images."""
+        image_bytes = self.run.local(prompt)
+        return Response(
+            content=image_bytes,
+            status_code=200,
+            media_type="image/png"
         )
