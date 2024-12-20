@@ -1,5 +1,6 @@
 import io
 import os
+from fastapi import HTTPException, Query, Request
 import modal
 import modal.gpu
 import logging
@@ -38,13 +39,16 @@ volume = modal.Volume.from_name("sd3-medium", create_if_missing=True)
 
 model_id = "stabilityai/stable-diffusion-3-medium-diffusers"
 
-@app.cls(image=image, gpu="A10G", timeout=8 * ONE_MINUTE, secrets=[modal.Secret.from_name("huggingface-secret")],volumes={MODEL_DIR: volume})
+@app.cls(image=image, gpu="A10G",
+ timeout=8 * ONE_MINUTE,
+ secrets=[modal.Secret.from_name("huggingface-secret"),
+ modal.Secret.from_name("API_ACCESS")],
+ volumes={MODEL_DIR: volume})
 class Inference:
 
     @modal.build()
     def download_model(self):
         """Downloads the model and saves it to the Modal Volume during build."""
-        logging.info(" Downloading the Stable Diffusion model 🚶‍♂️...")
         model_path = os.path.join(MODEL_DIR, "model_index.json")
         if os.path.exists(model_path):
             logging.info(" Skip download --> Model is already present on volume 👍")
@@ -52,6 +56,7 @@ class Inference:
             pipeline = StableDiffusion3Pipeline.from_pretrained(model_id, torch_dtype=torch.float16)
             pipeline.save_pretrained(MODEL_DIR)
             logging.info(" Model downloaded and saved to the volume. 🥳")
+        self.API_KEY= os.environ(["API_KEY"])
     
     @modal.enter()
     def initialize(self):
@@ -79,8 +84,16 @@ class Inference:
         return buffer.getvalue()
 
     @modal.web_endpoint(docs=True)
-    def web(self, prompt: str):
+    def web(self, request: Request, prompt: str = Query(..., description="prompt for image generation")):
         """Exposes a web endpoint for generating images."""
+        
+        user_key = request.headers.get("X-API-KEY") 
+        if user_key!= self.API_KEY:
+            raise HTTPException(
+                status_code=401,
+                detail="Unauthorized attempt to access the endpoint"
+            )
+            
         image_bytes = self.run.local(prompt)
         return Response(
             content=image_bytes,
