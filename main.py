@@ -103,13 +103,5 @@ def update_keep_warm():
     from datetime import datetime, timezone
     import requests
     health_url = "https://saliftankoano--genwalls-inference-health.modal.run"
-    generate_url = "https://saliftankoano--genwalls-inference-generate.modal.run"
-    
     health_response = requests.get(health_url)
     print(f"Health check at: {health_response.json()['timestamp']}")
-
-    # Send a generation 
-    # Consider removal to avoid charges for GPU usage on image generations every 5 mins
-    headers = {"X-API-KEY": os.environ["API_KEY"]}
-    generate_response = requests.get(generate_url, headers=headers)
-    print(f"Generation successful at: {datetime.now(timezone.utc).isoformat()}")
