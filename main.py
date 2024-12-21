@@ -36,7 +36,7 @@ volume = modal.Volume.from_name("sd3-medium", create_if_missing=True)
 
 model_id = "stabilityai/stable-diffusion-3-medium-diffusers"
 
-@app.cls(image=image, gpu="A10G",timeout=8 * ONE_MINUTE, secrets=[modal.Secret.from_name("huggingface-secret"), modal.Secret.from_name("API_ACCESS")], volumes={MODEL_DIR: volume}, container_idle_timeout= 300)
+@app.cls(image=image, gpu="A10G",timeout=8 * ONE_MINUTE, secrets=[modal.Secret.from_name("huggingface-secret"), modal.Secret.from_name("API_ACCESS")], volumes={MODEL_DIR: volume}, container_idle_timeout= 180)
 class Inference:
     @modal.build()
     def download_model(self):
@@ -98,7 +98,7 @@ class Inference:
         "Keeps the container warm"
         return {"status": "Healthy", "timestamp": datetime.now(timezone.utc).isoformat()}
 
-@app.function(schedule=modal.Cron("*/5 * * * *"), secrets=[modal.Secret.from_name("API_ACCESS")], image=image)  # run every 5 minutes
+@app.function(schedule=modal.Cron("0 */4 * * *"), secrets=[modal.Secret.from_name("API_ACCESS")], image=image)  # run every 4 hours
 def update_keep_warm():
     from datetime import datetime, timezone
     import requests
