@@ -37,7 +37,7 @@ volume = modal.Volume.from_name("sd3-medium", create_if_missing=True)
 model_id = "stabilityai/stable-diffusion-3-medium-diffusers"
 
 @app.cls(image=image, gpu="A10G",timeout=8 * ONE_MINUTE, secrets=[modal.Secret.from_name("huggingface-secret"), modal.Secret.from_name("API_ACCESS")], volumes={MODEL_DIR: volume}, container_idle_timeout= 180)
-class Inference:
+class GenImage:
     @modal.build()
     def download_model(self):
         from diffusers import StableDiffusion3Pipeline
@@ -99,9 +99,10 @@ class Inference:
         "Keeps the container warm"
         return {"status": "Healthy", "timestamp": datetime.now(timezone.utc).isoformat()}
 
-@app.function(schedule=modal.Cron("0 */4 * * *"), secrets=[modal.Secret.from_name("API_ACCESS")], image=image)  # run every 4 hours
+@app.function(schedule=modal.Cron("0 */4 * * *"), secrets=[modal.Secret.from_name("API_ACCESS"), modal.Secret.from_name("HEALTH")], image=image)  # run every 4 hours
 def update_keep_warm():
     import requests
-    health_url = "https://saliftankoano--genwalls-inference-health.modal.run"
+    
+    health_url = os.environ["HEALTH"]
     health_response = requests.get(health_url)
     print(f"Health check at: {health_response.json()['timestamp']}")
