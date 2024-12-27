@@ -30,7 +30,7 @@ image = modal.Image.debian_slim(python_version="3.12").pip_install(
 
 import os
 import io
-
+from starlette.requests import Request
 MODEL_DIR = "/model"  # Path inside the volume
 volume = modal.Volume.from_name("sd3-medium", create_if_missing=True)
 
@@ -80,9 +80,10 @@ class Inference:
         return buffer.getvalue()
 
     @modal.web_endpoint(docs=True)
-    def generate(self, prompt: str, api_key: str):
+    def generate(self, prompt: str, request: Request):
         from starlette.responses import Response
-
+        
+        api_key = request.headers.get("X-API-KEY")
         # Validate the API key
         if api_key != self.API_KEY:
             return Response("Unauthorized attempt to access the endpoint", status_code=401)
@@ -100,7 +101,6 @@ class Inference:
 
 @app.function(schedule=modal.Cron("0 */4 * * *"), secrets=[modal.Secret.from_name("API_ACCESS")], image=image)  # run every 4 hours
 def update_keep_warm():
-    from datetime import datetime, timezone
     import requests
     health_url = "https://saliftankoano--genwalls-inference-health.modal.run"
     health_response = requests.get(health_url)
