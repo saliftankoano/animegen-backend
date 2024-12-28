@@ -56,7 +56,7 @@ class AnimeGen:
         """Loads the model from the volume into GPU memory at runtime."""
         import torch
         from diffusers import DiffusionPipeline
-        # self.API_KEY = os.environ["API_KEY"]
+        self.API_KEY = os.environ["API_KEY"]
         logging.info("Initializing DiffusionPipeline and loading model to GPU 🚀...")
         # Mount the volume and load model
         self.pipe = DiffusionPipeline.from_pretrained(MODEL_DIR, torch_dtype=torch.float16)
@@ -71,7 +71,7 @@ class AnimeGen:
         logging.info(f"Generating image with prompt: {prompt}")
         image = self.pipe(
             prompt,
-            negative_prompt="malformed body, malformed face, malformed hands, malformed feet, bad hands, bad feet, bad face, foggy, unclear, noisy",
+            negative_prompt="nsfw, longbody, lowres, bad anatomy, bad hands, missing fingers, pubic hair, extra digit, fewer digits, cropped, worst quality, low quality, very displeasing",
             num_inference_steps=50,
             # guidance_scale=7.0,
         ).images[0]
@@ -83,10 +83,10 @@ class AnimeGen:
     def generate(self, prompt: str, request: Request):
         from starlette.responses import Response
         
-        # api_key = request.headers.get("X-API-KEY")
+        api_key = request.headers.get("X-API-KEY")
         # Validate the API key
-        # if api_key != self.API_KEY:
-        #     return Response("Unauthorized attempt to access the endpoint", status_code=401)
+        if api_key != self.API_KEY:
+            return Response("Unauthorized attempt to access the endpoint", status_code=401)
         # Generate the image
         image_bytes = self.run.local(prompt)
         return Response(content=image_bytes, status_code=200, media_type="image/png")
