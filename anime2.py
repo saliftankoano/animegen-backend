@@ -37,7 +37,7 @@ volume = modal.Volume.from_name("animagine-xl-3.1", create_if_missing=True)
 model_id = "cagliostrolab/animagine-xl-3.1"
 
 @app.cls(image=image, gpu="A10G",timeout=8 * ONE_MINUTE, secrets=[modal.Secret.from_name("huggingface-secret"), modal.Secret.from_name("API_KEY")], volumes={MODEL_DIR: volume}, container_idle_timeout= 180)
-class AnimeGen:
+class AnimeTest:
     @modal.build()
     def download_model(self):
         from diffusers import DiffusionPipeline
@@ -62,6 +62,8 @@ class AnimeGen:
         self.pipe = DiffusionPipeline.from_pretrained(
             MODEL_DIR, 
             torch_dtype=torch.float16,
+            truncation=False,
+            max_length=512
         )
         self.pipe.enable_model_cpu_offload()
         self.pipe.enable_attention_slicing()
@@ -75,53 +77,28 @@ class AnimeGen:
     def run(self, prompt: str) -> list[bytes]:
         """Generates an image based on the given prompt."""
         logging.info(f"Generating image with prompt: {prompt}")
-        
-        tokens = self.pipe.tokenizer.encode(prompt)
-        logging.info(f"Token count: {len(tokens)}")
-        logging.info(f"Tokenized text: {self.pipe.tokenizer.convert_ids_to_tokens(tokens)}")
-        
         image = self.pipe(
             prompt,
             negative_prompt="nsfw, longbody, lowres, bad anatomy, bad hands, missing fingers, pubic hair, extra digit, fewer digits, cropped, worst quality, low quality, very displeasing",
             num_inference_steps=50,
+            # guidance_scale=7.0,
         ).images[0]
-            
         buffer = io.BytesIO()
-        image.save(buffer, format="PNG", quality=100, optimize=False, compress_level=0)
+        image.save(buffer, format="PNG", quality=95)
         return buffer.getvalue()
 
     @modal.web_endpoint(docs=True)
     def generate(self, prompt: str, request: Request):
         from starlette.responses import Response
-        from urllib.parse import unquote
         
-        api_key = request.headers.get("X-API-KEY")
-        # Validate the API key
-        if api_key != self.API_KEY:
-            return Response("Unauthorized attempt to access the endpoint", status_code=401)
+        # api_key = request.headers.get("X-API-KEY")
+        # # Validate the API key
+        # if api_key != self.API_KEY:
+        #     return Response("Unauthorized attempt to access the endpoint", status_code=401)
         # Generate the image
-        decoded_prompt = unquote(prompt)
-        image_bytes = self.run.local(decoded_prompt)
-        
-        # Enhanced headers to prevent any transformation
-        headers = {
-            "Content-Type": "image/png",
-            "Cache-Control": "no-transform, no-cache, must-revalidate, proxy-revalidate, max-age=0",
-            "Accept-Ranges": "none",
-            "Vary": "Accept-Encoding",
-            "Pragma": "no-cache",
-            "Expires": "0",
-            "Cross-Origin-Resource-Policy": "cross-origin",
-            "Access-Control-Allow-Origin": "*",
-            "Access-Control-Allow-Methods": "GET",
-        }
-        
-        return Response(
-            content=image_bytes, 
-            status_code=200, 
-            media_type="image/png",
-            headers=headers
-        )
+        image_bytes = self.run.local(prompt)
+        return Response(content=image_bytes, status_code=200, media_type="image/png")
+
 
     @modal.web_endpoint(docs=True)
     def health(self):
